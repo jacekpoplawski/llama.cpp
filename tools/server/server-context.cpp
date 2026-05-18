@@ -2650,6 +2650,28 @@ private:
                                 }
 
                                 if (pos_min >= pos_min_thold) {
+                                    const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+                                    const auto rollback_distance = pos_max - (pos_next - 1);
+
+                                    SLT_WRN(slot,
+                                            "checkpoint restore needed: n_past = %d, cached_tokens = %d, task_tokens = %d, "
+                                            "pos = [%d, %d], target_pos = %d, n_swa = %d, seq_rm_type = %d, "
+                                            "n_rs_seq = %u, rollback_distance = %d, checkpoints = %zu\n",
+                                            n_past, slot.prompt.n_tokens(), slot.task->n_tokens(),
+                                            pos_min, pos_max, pos_min_thold,
+                                            n_swa, (int) ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt),
+                                            rollback_distance, slot.prompt.checkpoints.size());
+
+                                    if (rollback_distance == 1 && slot.prompt.n_tokens() > 0) {
+                                        auto last = slot.prompt.tokens[slot.prompt.n_tokens() - 1];
+
+                                        SLT_WRN(slot, "rollback +1: pos_next=%d last_cached_id=%d is_eog=%d piece='%s'\n",
+                                            (int) pos_next,
+                                            (int) last,
+                                            llama_vocab_is_eog(vocab, last),
+                                            common_token_to_piece(ctx_tgt, last).c_str());
+                                    }
+
                                     SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d, n_swa = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min, n_swa);
 
                                     // search for a context checkpoint
