@@ -1879,7 +1879,7 @@ private:
             // make room for the new checkpoint, if needed
             const auto & cur = slot.prompt.checkpoints.front();
 
-            SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+            SLT_INF(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                     cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
 
             slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
@@ -2649,54 +2649,28 @@ private:
                                 }
 
                                 if (pos_min >= pos_min_thold) {
-                                    const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
-                                    const auto rollback_distance = pos_max - (pos_next - 1);
-
-                                    SLT_WRN(slot,
-                                            "checkpoint restore needed: n_past = %d, cached_tokens = %d, task_tokens = %d, "
-                                            "pos = [%d, %d], target_pos = %d, n_swa = %d, seq_rm_type = %d, "
-                                            "n_rs_seq = %u, rollback_distance = %d, checkpoints = %zu\n",
-                                            n_past, slot.prompt.n_tokens(), slot.task->n_tokens(),
-                                            pos_min, pos_max, pos_min_thold,
-                                            n_swa, (int) ctx_tgt_seq_rm_type, llama_n_rs_seq(ctx_tgt),
-                                            rollback_distance, slot.prompt.checkpoints.size());
-
-                                    if (rollback_distance == 1 && slot.prompt.n_tokens() > 0) {
-                                        auto last = slot.prompt.tokens[slot.prompt.n_tokens() - 1];
-
-                                        SLT_WRN(slot, "rollback +1: pos_next=%d last_cached_id=%d is_eog=%d piece='%s'\n",
-                                            (int) pos_next,
-                                            (int) last,
-                                            llama_vocab_is_eog(vocab, last),
-                                            common_token_to_piece(ctx_tgt, last).c_str());
-                                    }
-
                                     // search for a context checkpoint
-                                    auto it = slot.prompt.checkpoints.rbegin();
-                                    size_t checkpoint_skip_newer = 0;
-
-                                    for (; it != slot.prompt.checkpoints.rend(); ++it) {
-                                        if (it->pos_min < pos_min_thold || it->pos_min == 0) {
-                                            break;
-                                        }
-                                        checkpoint_skip_newer++;
-                                    }
+                                    auto it = std::find_if(
+                                        slot.prompt.checkpoints.rbegin(),
+                                        slot.prompt.checkpoints.rend(),
+                                        [pos_min_thold](const common_prompt_checkpoint & checkpoint) {
+                                            return checkpoint.pos_min < pos_min_thold || checkpoint.pos_min == 0;
+                                        });
 
                                     const size_t checkpoint_count = slot.prompt.checkpoints.size();
                                     bool do_reset = it == slot.prompt.checkpoints.rend();
 
                                     if (!do_reset) {
                                         // restore the context checkpoint
-                                        const int32_t n_past_before_restore = n_past;
                                         const int32_t cached_tokens_before_restore = slot.prompt.n_tokens();
-                                        const size_t  checkpoint_index = checkpoint_count - checkpoint_skip_newer;
+                                        const size_t  checkpoint_index =
+                                            checkpoint_count - std::distance(slot.prompt.checkpoints.rbegin(), it);
 
                                         it->load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                                         it->load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
                                         pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                         n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
-                                        SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
 
                                         const int32_t task_tokens = slot.task->n_tokens();
                                         const int32_t cache_rollback_tokens = std::max(0, cached_tokens_before_restore - n_past);
@@ -2704,12 +2678,12 @@ private:
                                         const int32_t new_prompt_tokens = std::max(0, task_tokens - cached_tokens_before_restore);
                                         const int32_t prompt_eval_tokens = std::max(0, task_tokens - n_past);
 
-                                        SLT_WRN(slot,
-                                                "checkpoint restore summary: selected_index = %zu, checkpoints = %zu, skipped_unusable_newer = %zu, "
-                                                "cached_tokens_before = %d, task_tokens = %d, n_past_before = %d, n_past_after = %d, "
+                                        SLT_INF(slot,
+                                                "restored context checkpoint: selected_index = %zu, checkpoints = %zu, "
+                                                "pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB, "
                                                 "cache_rollback_tokens = %d, cached_prompt_eval_tokens = %d, new_prompt_tokens = %d, prompt_eval_tokens = %d\n",
-                                                checkpoint_index, checkpoint_count, checkpoint_skip_newer,
-                                                cached_tokens_before_restore, task_tokens, n_past_before_restore, n_past,
+                                                checkpoint_index, checkpoint_count,
+                                                it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024,
                                                 cache_rollback_tokens, cached_prompt_eval_tokens, new_prompt_tokens, prompt_eval_tokens);
                                     }
 
@@ -2723,11 +2697,9 @@ private:
                                         const int32_t new_prompt_tokens = std::max(0, task_tokens - cached_tokens_before_reset);
 
                                         SLT_WRN(slot,
-                                                "checkpoint restore summary: selected_index = none, checkpoints = %zu, skipped_unusable_newer = %zu, "
-                                                "cached_tokens_before = %d, task_tokens = %d, n_past_before = %d, n_past_after = 0, "
+                                                "checkpoint restore summary: selected_index = none, checkpoints = %zu, "
                                                 "cache_rollback_tokens = %d, cached_prompt_eval_tokens = %d, new_prompt_tokens = %d, prompt_eval_tokens = %d\n",
-                                                checkpoint_count, checkpoint_skip_newer,
-                                                cached_tokens_before_reset, task_tokens, n_past,
+                                                checkpoint_count,
                                                 cached_tokens_before_reset, cached_prompt_eval_tokens, new_prompt_tokens, task_tokens);
                                         pos_next = 0;
                                         n_past = 0;
