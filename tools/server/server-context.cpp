@@ -2672,24 +2672,25 @@ private:
                                             common_token_to_piece(ctx_tgt, last).c_str());
                                     }
 
-                                    SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d, n_swa = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min, n_swa);
-
                                     // search for a context checkpoint
-                                    const auto it = std::find_if(
-                                        slot.prompt.checkpoints.rbegin(),
-                                        slot.prompt.checkpoints.rend(),
-                                        [&, func_name = __func__](const auto & cur) {
-                                            // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
-                                            LOG_INF("slot %12.*s: id %2d | task %d | Checking checkpoint with [%d, %d] against %d...\n", 12,
-                                                func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, pos_min_thold);
-                                            return cur.pos_min < pos_min_thold || cur.pos_min == 0;
-                                        }
-                                    );
+                                    auto it = slot.prompt.checkpoints.rbegin();
+                                    size_t checkpoint_skip_newer = 0;
 
+                                    for (; it != slot.prompt.checkpoints.rend(); ++it) {
+                                        if (it->pos_min < pos_min_thold || it->pos_min == 0) {
+                                            break;
+                                        }
+                                        checkpoint_skip_newer++;
+                                    }
+
+                                    const size_t checkpoint_count = slot.prompt.checkpoints.size();
                                     bool do_reset = it == slot.prompt.checkpoints.rend();
 
                                     if (!do_reset) {
                                         // restore the context checkpoint
+                                        const int32_t n_past_before_restore = n_past;
+                                        const int32_t cached_tokens_before_restore = slot.prompt.n_tokens();
+                                        const size_t  checkpoint_index = checkpoint_count - checkpoint_skip_newer;
 
                                         it->load_tgt(ctx_tgt,       slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                                         it->load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
@@ -2697,11 +2698,38 @@ private:
                                         pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                         n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
                                         SLT_WRN(slot, "restored context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_past = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, it->n_tokens, n_past, (float) it->size() / 1024 / 1024);
+
+                                        const int32_t task_tokens = slot.task->n_tokens();
+                                        const int32_t cache_rollback_tokens = std::max(0, cached_tokens_before_restore - n_past);
+                                        const int32_t cached_prompt_eval_tokens = std::max(0, std::min(task_tokens, cached_tokens_before_restore) - n_past);
+                                        const int32_t new_prompt_tokens = std::max(0, task_tokens - cached_tokens_before_restore);
+                                        const int32_t prompt_eval_tokens = std::max(0, task_tokens - n_past);
+
+                                        SLT_WRN(slot,
+                                                "checkpoint restore summary: selected_index = %zu, checkpoints = %zu, skipped_unusable_newer = %zu, "
+                                                "cached_tokens_before = %d, task_tokens = %d, n_past_before = %d, n_past_after = %d, "
+                                                "cache_rollback_tokens = %d, cached_prompt_eval_tokens = %d, new_prompt_tokens = %d, prompt_eval_tokens = %d\n",
+                                                checkpoint_index, checkpoint_count, checkpoint_skip_newer,
+                                                cached_tokens_before_restore, task_tokens, n_past_before_restore, n_past,
+                                                cache_rollback_tokens, cached_prompt_eval_tokens, new_prompt_tokens, prompt_eval_tokens);
                                     }
 
                                     if (do_reset) {
                                         SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
                                                 "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
+
+                                        const int32_t task_tokens = slot.task->n_tokens();
+                                        const int32_t cached_tokens_before_reset = slot.prompt.n_tokens();
+                                        const int32_t cached_prompt_eval_tokens = std::min(task_tokens, cached_tokens_before_reset);
+                                        const int32_t new_prompt_tokens = std::max(0, task_tokens - cached_tokens_before_reset);
+
+                                        SLT_WRN(slot,
+                                                "checkpoint restore summary: selected_index = none, checkpoints = %zu, skipped_unusable_newer = %zu, "
+                                                "cached_tokens_before = %d, task_tokens = %d, n_past_before = %d, n_past_after = 0, "
+                                                "cache_rollback_tokens = %d, cached_prompt_eval_tokens = %d, new_prompt_tokens = %d, prompt_eval_tokens = %d\n",
+                                                checkpoint_count, checkpoint_skip_newer,
+                                                cached_tokens_before_reset, task_tokens, n_past,
+                                                cached_tokens_before_reset, cached_prompt_eval_tokens, new_prompt_tokens, task_tokens);
                                         pos_next = 0;
                                         n_past = 0;
                                     }
@@ -2710,14 +2738,24 @@ private:
 
                             {
                                 // erase any checkpoints with pos_max > pos_next
+                                size_t n_invalidated = 0;
+                                size_t size_invalidated = 0;
+
                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
                                     const auto & cur = *it;
                                     if (cur.pos_max > pos_next) {
+                                        n_invalidated++;
+                                        size_invalidated += cur.size();
                                         SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
                                         it = slot.prompt.checkpoints.erase(it);
                                     } else {
                                         ++it;
                                     }
+                                }
+
+                                if (n_invalidated > 0) {
+                                    SLT_WRN(slot, "checkpoint invalidation summary: erased = %zu, remaining = %zu, size = %.3f MiB, pos_next = %d\n",
+                                            n_invalidated, slot.prompt.checkpoints.size(), (float) size_invalidated / 1024 / 1024, pos_next);
                                 }
                             }
                         }
@@ -2861,8 +2899,6 @@ private:
                         // can be created after the previous messages
                         if (has_last_user_checkpoint &&
                             slot.prompt.n_tokens() == checkpoint_before_last_user_n_tokens) {
-                            SLT_INF(slot, "checkpoint before user input reached: ending prompt batch at prompt_n_tokens = %d\n",
-                                    slot.prompt.n_tokens());
                             break;
                         }
 
@@ -2932,9 +2968,6 @@ private:
                         (after_last_user_checkpoint && near_prompt_end);
 
                     if (do_checkpoint && !checkpoint_allowed_by_last_user) {
-                        SLT_INF(slot, "skip checkpoint at %d, expected checkpoint before user input = %d\n",
-                                checkpoint_batch_start, checkpoint_before_last_user_n_tokens);
-
                         do_checkpoint = false;
                     }
 
