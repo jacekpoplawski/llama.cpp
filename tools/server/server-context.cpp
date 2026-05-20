@@ -2972,13 +2972,29 @@ private:
                     }
 
                     // no need for checkpoints with no tokens or before the prompt reaches the configured token count
-                    do_checkpoint = do_checkpoint && (pos_min >= 0 && slot.prompt.n_tokens() >= params_base.checkpoint_start_after_nt);
+                    if (do_checkpoint && (pos_min < 0 || slot.prompt.n_tokens() < params_base.checkpoint_start_after_nt)) {
+                        SLT_INF(slot,
+                                "checkpoint skipped by start-after: prompt_n_tokens = %d, start_after = %d, pos_min = %d\n",
+                                slot.prompt.n_tokens(), params_base.checkpoint_start_after_nt, pos_min);
+                        do_checkpoint = false;
+                    }
 
                     // do not checkpoint after mtmd chunks
                     do_checkpoint = do_checkpoint && !has_mtmd;
 
                     // no need to create checkpoints that are too close together
-                    do_checkpoint = do_checkpoint && (slot.prompt.checkpoints.empty() || checkpoint_batch_start > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_spacing_nt);
+                    if (do_checkpoint && !slot.prompt.checkpoints.empty()) {
+                        const int64_t last_checkpoint_n_tokens = slot.prompt.checkpoints.back().n_tokens;
+                        const int64_t checkpoint_spacing = checkpoint_batch_start - last_checkpoint_n_tokens;
+
+                        if (checkpoint_spacing <= params_base.checkpoint_min_spacing_nt) {
+                            SLT_INF(slot,
+                                    "checkpoint skipped by min-spacing: batch_start = %d, last_checkpoint = %" PRId64 ", spacing = %" PRId64 ", min_spacing = %d\n",
+                                    checkpoint_batch_start, last_checkpoint_n_tokens, checkpoint_spacing,
+                                    params_base.checkpoint_min_spacing_nt);
+                            do_checkpoint = false;
+                        }
+                    }
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
