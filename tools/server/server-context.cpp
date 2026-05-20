@@ -988,8 +988,8 @@ private:
         SRV_INF("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
 
         if (params_base.n_ctx_checkpoints > 0) {
-            SRV_INF("context checkpoints enabled, max = %d, every = %d, start after = %d, min spacing = %d\n",
-                    params_base.n_ctx_checkpoints, params_base.checkpoint_every_nt,
+            SRV_INF("context checkpoints enabled, max = %d, start after = %d, min spacing = %d\n",
+                    params_base.n_ctx_checkpoints,
                     params_base.checkpoint_start_after_nt, params_base.checkpoint_min_spacing_nt);
         } else {
             SRV_INF("%s", "context checkpoints disabled\n");
@@ -2909,24 +2909,11 @@ private:
                         slot.init_sampler();
                     } else {
                         const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
-                        const bool use_periodic_checkpoint_schedule = !has_last_user_checkpoint && !near_prompt_end;
+                        const bool skip_checkpoint = !has_last_user_checkpoint && !near_prompt_end;
 
-                        if (use_periodic_checkpoint_schedule) {
-                            // only do non-end checkpoints if the "checkpoint every n tokens" option is set
-                            do_checkpoint = do_checkpoint && params_base.checkpoint_every_nt > 0;
-
-                            if (do_checkpoint) {
-                                llama_pos last_checkpoint = 0;
-                                if (!slot.prompt.checkpoints.empty()) {
-                                    last_checkpoint = slot.prompt.checkpoints.back().n_tokens;
-                                }
-
-                                do_checkpoint = do_checkpoint && slot.prompt.n_tokens() - batch.n_tokens - last_checkpoint >= params_base.checkpoint_every_nt;
-
-                                if (do_checkpoint) {
-                                    SLT_INF(slot, "%d tokens since last checkpoint at %d, creating new checkpoint during processing at position %d\n", params_base.checkpoint_every_nt, last_checkpoint, slot.prompt.n_tokens());
-                                }
-                            }
+                        // Ordinary mid-prompt checkpoints were previously controlled by --checkpoint-every-n-tokens.
+                        if (skip_checkpoint) {
+                            do_checkpoint = false;
                         }
                     }
 
@@ -2936,17 +2923,9 @@ private:
                     const bool at_last_user_checkpoint =
                         has_last_user_checkpoint &&
                         checkpoint_batch_start == checkpoint_before_last_user_n_tokens;
-                    const int64_t last_checkpoint = slot.prompt.checkpoints.empty()
-                        ? 0
-                        : slot.prompt.checkpoints.back().n_tokens;
-                    const int64_t distance_from_last_checkpoint = checkpoint_batch_start - last_checkpoint;
-                    const bool regular_checkpoint_due =
-                        params_base.checkpoint_every_nt > 0 &&
-                        distance_from_last_checkpoint >= params_base.checkpoint_every_nt;
                     const bool checkpoint_allowed_by_last_user =
                         !has_last_user_checkpoint ||
-                        at_last_user_checkpoint ||
-                        regular_checkpoint_due;
+                        at_last_user_checkpoint;
 
                     if (do_checkpoint && !checkpoint_allowed_by_last_user) {
                         SLT_INF(slot, "skip checkpoint at %d, expected checkpoint before user input = %d\n",
