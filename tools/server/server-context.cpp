@@ -988,9 +988,8 @@ private:
         SRV_INF("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
 
         if (params_base.n_ctx_checkpoints > 0) {
-            SRV_INF("context checkpoints enabled, max = %d, start after = %d, min spacing = %d\n",
-                    params_base.n_ctx_checkpoints,
-                    params_base.checkpoint_start_after_nt, params_base.checkpoint_min_spacing_nt);
+            SRV_INF("context checkpoints enabled, max = %d, min spacing = %d\n",
+                    params_base.n_ctx_checkpoints, params_base.checkpoint_min_spacing_nt);
         } else {
             SRV_INF("%s", "context checkpoints disabled\n");
         }
@@ -2971,11 +2970,8 @@ private:
                         do_checkpoint = false;
                     }
 
-                    // no need for checkpoints with no tokens or before the prompt reaches the configured token count
-                    if (do_checkpoint && (pos_min < 0 || slot.prompt.n_tokens() < params_base.checkpoint_start_after_nt)) {
-                        SLT_INF(slot,
-                                "checkpoint skipped by start-after: prompt_n_tokens = %d, start_after = %d, pos_min = %d\n",
-                                slot.prompt.n_tokens(), params_base.checkpoint_start_after_nt, pos_min);
+                    // no need for checkpoints before the slot has KV state
+                    if (do_checkpoint && pos_min < 0) {
                         do_checkpoint = false;
                     }
 
