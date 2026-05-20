@@ -2893,6 +2893,7 @@ private:
                     // checkpoints are created before the current batch is decoded, so
                     // their token position is the batch start rather than the prompt end
                     const int32_t checkpoint_batch_start = slot.prompt.n_tokens() - n_tokens_cur;
+                    const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
 
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -2908,11 +2909,10 @@ private:
 
                         slot.init_sampler();
                     } else {
-                        const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
-                        const bool skip_checkpoint = !has_last_user_checkpoint && !near_prompt_end;
+                        const bool skip_ordinary_mid_prompt_checkpoint = !has_last_user_checkpoint && !near_prompt_end;
 
-                        // Ordinary mid-prompt checkpoints were previously controlled by --checkpoint-every-n-tokens.
-                        if (skip_checkpoint) {
+                        // Ordinary mid-prompt checkpoints were previously controlled by the removed interval option.
+                        if (skip_ordinary_mid_prompt_checkpoint) {
                             do_checkpoint = false;
                         }
                     }
@@ -2923,9 +2923,13 @@ private:
                     const bool at_last_user_checkpoint =
                         has_last_user_checkpoint &&
                         checkpoint_batch_start == checkpoint_before_last_user_n_tokens;
+                    const bool after_last_user_checkpoint =
+                        has_last_user_checkpoint &&
+                        checkpoint_batch_start > checkpoint_before_last_user_n_tokens;
                     const bool checkpoint_allowed_by_last_user =
                         !has_last_user_checkpoint ||
-                        at_last_user_checkpoint;
+                        at_last_user_checkpoint ||
+                        (after_last_user_checkpoint && near_prompt_end);
 
                     if (do_checkpoint && !checkpoint_allowed_by_last_user) {
                         SLT_INF(slot, "skip checkpoint at %d, expected checkpoint before user input = %d\n",
